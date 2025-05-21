@@ -1,4 +1,5 @@
 from itertools import combinations
+from linecache import cache
 
 import numpy as np
 from numba import njit
@@ -8,13 +9,13 @@ import timeit
 
 class BoolFunc:
     def __init__(self, truth_vector: str):
+        # Корректность содержимого веденной строки: строка должна содержать только 0 и 1;
+        if set(truth_vector) - {'0', '1'}:
+            raise ValueError(f"Ошибка: вектор значений {truth_vector} содержит символы, отличные от '0' и '1'.")
         size = len(truth_vector)  # 2^n
         # Корректность размера введенной строки: размер > 0 и размер = 2^n;
         if not (size > 0 and (size & (size - 1)) == 0):
             raise ValueError("Длина вектора значений должна быть степенью двойки!")
-        # Корректность содержимого веденной строки: строка должна содержать только 0 и 1;
-        if set(truth_vector) - {'0', '1'}:
-            raise ValueError(f"Ошибка: вектор значений {truth_vector} содержит символы, отличные от '0' и '1'.")
 
         self.size = size  # Размер вектора значений
         self.n = self.size.bit_length() - 1  # log2(size)
@@ -24,16 +25,75 @@ class BoolFunc:
            - .encode() преобразует строку в байтовый объект (тип bytes), используя кодировку по умолчанию (обычно UTF-8);
            - np.frombuffer интерпретирует байты как массив чисел типа uint8;
            - (- ord('0')) - преобразует ASCII-коды цифр в соответствующие числа.'''
-        self.tv_packed = np.packbits(self.tv)  # Упаковывает tv в байты (uint8), каждые 8 бит упакованы в один байт.
+        self.tv_packed = np.packbits(self.tv,
+                                     bitorder='big')  # Упаковывает tv в байты (uint8), каждые 8 бит упакованы в один байт.
 
         # Отложенные вычисления, инициализация при необходимости
-
         self._sv = None  # sign_vector - знаковый или полярный вектор.
         self._popcount_table8 = None
         self._popcount_table16 = None
         self._w = None  # Вес.
         self._anf = None
         self._walsh_spec = None
+
+    @classmethod
+    def from_array(cls, arr: np.ndarray):
+        if arr.dtype != np.uint8 or not np.isin(arr, [0, 1]).all():
+            raise ValueError("Массив должен содержать только 0 и 1 (uint8).")
+        size = arr.size
+        if size == 0 or (size & (size - 1)) != 0:
+            raise ValueError("Размер массива должен быть больше 0 и степенью двойки.")
+
+        obj = cls.__new__(cls)  # Низкоуровневый способ создать объект класса, в обход  __init__ методу.
+        obj.size = size
+        obj.n = size.bit_length() - 1
+        obj.tv = arr
+        obj.tv_packed = np.packbits(arr)
+        obj._sv = obj._popcount_table8 = obj._popcount_table16 = obj._w = obj._anf = obj._walsh_spec = None
+        return obj
+
+    @classmethod
+    def from_packed(cls, packed: np.ndarray, n: int = None):
+        bits = np.unpackbits(packed, bitorder='big')
+        if n is not None:
+            size = 1 << n
+            if bits.size < size:
+                raise ValueError(f"Недостаточно данных: требуется {size} бит, получено {bits.size}")
+            bits = bits[:size]
+        return cls.from_array(bits)
+
+    @classmethod
+    def from_bytes(cls, byte_data: bytes, n: int = None):
+        packed = np.frombuffer(byte_data, dtype=np.uint8)
+        return cls.from_packed(packed, n)
+
+    @classmethod
+    def random(cls, n: int, packed: bool = False):
+        size = 1 << n
+
+        # Объект генератора псевдослучайных чисел, основанный на современном алгоритме PCG64
+        rng = np.random.default_rng()
+        tv = rng.integers(0, 2, size=size, dtype=np.uint8)  # Случайный массив 0 и 1 размера size
+        if packed:
+            return cls.from_packed(np.packbits(tv), n)
+        else:
+            return cls.from_array(tv)
+
+    def save_to_bin(self, filename: str) -> None:
+        """
+        Сохраняет булеву функцию в бинарный файл:
+        [1 байт n][упакованные значения tv_packed]
+        """
+        with open(filename, 'wb') as f:
+            f.write(bytes([self.n]))
+            f.write(self.tv_packed.tobytes())
+
+    @classmethod
+    def load_from_bin(cls, filename: str) -> 'BoolFunc':
+        with open(filename, 'rb') as f:
+            n = int.from_bytes(f.read(1), 'big')
+            packed = np.frombuffer(f.read(), dtype=np.uint8)
+        return cls.from_packed(packed, n=n)
 
     @property
     def sv(self):
@@ -71,6 +131,7 @@ class BoolFunc:
     def anf(self):
         """Вычисление АНФ функции с помощью быстрого преобразование Мёбиуса"""
         if self._anf is None:
+            fmt([0, 1, 1, 0], 2)
             self._anf = fmt(self.tv, self.n)
         return self._anf
 
@@ -162,7 +223,7 @@ class BoolFunc:
     #     return res
 
 
-@njit
+@njit(cache=True)
 def fmt(g, n):
     for i in range(n):
         step = 1 << i
@@ -174,7 +235,7 @@ def fmt(g, n):
     return g
 
 
-@njit
+@njit(cache=True)
 def fwht(arr):
     res = arr.copy()
     n = res.shape[0]
@@ -188,10 +249,6 @@ def fwht(arr):
                 res[j + h] = x - y
         h *= 2
     return res
-
-
-import numpy as np
-from numba import njit
 
 
 @njit
@@ -222,6 +279,7 @@ def fgbp(size: int, m: int, popcount_table: np.ndarray) -> np.ndarray:
 
 
 if __name__ == "__main__":
+    pass
     # Заранее вычисленные и сохраненные значения popcount_table*
     # popcount_table8 - массив, который хранит количество единичных битов для всех возможных 8-битных чисел (от 0 до 255).
     # popcount_table8 = np.array([bin(i).count('1') for i in range(256)], dtype=np.uint8)
@@ -229,6 +287,48 @@ if __name__ == "__main__":
     # # popcount_table16 - массив, который хранит количество единичных битов для всех возможных 8-битных чисел (от 0 до 255).
     # popcount_table16 = np.array([bin(i).count('1') for i in range(256)], dtype=np.uint8)
     # np.savez_compressed("popcount16.npz", popcount16=popcount_table16)
+
+    # ------------------------------------------Проверка from_str-------------------------------------------------------
+    # f_from_str = BoolFunc("0100")
+    # print(f"{f_from_str.tv} - вектор значений через str")  # -> [0 1 0 0] - вектор значений через str
+    # ------------------------------------------Проверка from_arr-------------------------------------------------------
+    # f_from_arr = BoolFunc.from_array(np.array([0, 1, 0, 0], dtype=np.uint8))
+    # print(f"{f_from_arr.tv} - вектор значений через arr")  # -> [0 1 0 0] - вектор значений через arr
+    # ------------------------------------------Проверка from_packed----------------------------------------------------
+    # f_from_packed = BoolFunc.from_packed(np.array([64], dtype=np.uint8), 2)  # 01000000 = 2^6 = 64 bitorder = 'big'
+    # print(f"{f_from_packed.tv} - вектор значений через packed arr")  # -> [0 1 0 0] - вектор значений через packed arr
+    #
+    # f_from_packed = BoolFunc.from_packed(np.array([53], dtype=np.uint8))  # 00110101 = 2^5 + 2^4 + 2^2 + 1 = 53
+    # print(f"{f_from_packed.tv} - вектор значений через packed arr")
+    # # -> [0 0 1 1 0 1 0 1] - вектор значений через packed arr
+    #
+    # f_from_packed = BoolFunc.from_packed(np.array([38, 168], dtype=np.uint8))
+    # print(f"{f_from_packed.tv} - вектор значений через packed arr")
+    # # -> [0 0 1 0 0 1 1 0 1 0 1 0 1 0 0 0] - вектор значений через packed arr
+    # ------------------------------------------Проверка from_bytes-----------------------------------------------------
+    # f_from_bytes = BoolFunc.from_bytes(bytes([0b01000000]), 2)  # Используем bitorder = 'big', сначала младшие биты.
+    # print(f"{f_from_bytes.tv} - вектор значений через bytes")  # -> [0 1 0 0] - вектор значений через bytes
+    #
+    # f_from_bytes = BoolFunc.from_bytes(bytes([0b00110101]), 3)  # Используем bitorder = 'big', сначала младшие биты.
+    # print(f"{f_from_bytes.tv} - вектор значений через bytes")  # -> [0 0 1 1 0 1 0 1] - вектор значений через bytes
+    #
+    # f_from_bytes = BoolFunc.from_bytes(bytes([0b00100110,0b10101000]))  # Используем bitorder = 'big', сначала младшие биты.
+    # print(f"{f_from_bytes.tv} - вектор значений через bytes")
+    # # -> [0 0 1 0 0 1 1 0 1 0 1 0 1 0 0 0] - вектор значений через bytes
+    # ------------------------------Проверка генераций случайных функций от n переменных--------------------------------
+    # f_random = BoolFunc.random(3)
+    # print(f_random.tv) # -> [0 0 1 1 1 1 1 1]
+    # ------------------------------------Сохранение функций в *.bin файл ----------------------------------------------
+    # f_for_save = BoolFunc("0110")
+    # f_for_save.save_to_bin("xor.bin")
+    # f_for_load = BoolFunc.load_from_bin("xor.bin")
+    # print(f_for_load.tv)
+    # print(f_for_load.anf)
+    #
+    # f_for_save = BoolFunc.from_bytes(bytes([0b00100110,0b10101000]))
+    # f_for_save.save_to_bin("func_4.bin")
+    # f_for_load = BoolFunc.load_from_bin("func_4.bin")
+    # print(f_for_load.tv)
 
     # f = BoolFunc("1" * (1 << 21))
     # # print(f'Вектор значений: {f.tv}')
@@ -263,7 +363,5 @@ if __name__ == "__main__":
     # print("Функция 1: среднее время =", time1 / 100)
     # print("Функция 2: среднее время =", time2 / 100)
     # print(f"Ускорение: {time1 / time2}x")
-    f = BoolFunc("11000110")
-    print(f.generate_by_popcount(1))
-    print(f.walsh_spec)
-    print(f.is_correlation_immune(1))
+    # f = BoolFunc("00110101")
+    # print(f.anf)
