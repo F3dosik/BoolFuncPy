@@ -1,6 +1,7 @@
+from numba import njit
 import numpy as np
+b = np.arange(4)
+print(b)
+a = 0b11
 
-a = np.array([0,0,0,0,0,1,0,0, 0,0,0,0,0,1,0,0])
-a_1 = np.packbits(a, bitorder='big')
-print(a_1)
-print(a_1.size)
+print(type(a))

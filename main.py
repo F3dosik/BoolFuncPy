@@ -1,9 +1,9 @@
+from codecs import BOM_LE
 from itertools import combinations
-from linecache import cache
 
 import numpy as np
-from numba import njit
-import numpy.typing as npt
+from numba import njit, prange
+
 import timeit
 
 
@@ -25,8 +25,9 @@ class BoolFunc:
            - .encode() преобразует строку в байтовый объект (тип bytes), используя кодировку по умолчанию (обычно UTF-8);
            - np.frombuffer интерпретирует байты как массив чисел типа uint8;
            - (- ord('0')) - преобразует ASCII-коды цифр в соответствующие числа.'''
-        self.tv_packed = np.packbits(self.tv,
-                                     bitorder='big')  # Упаковывает tv в байты (uint8), каждые 8 бит упакованы в один байт.
+
+        # Упаковывает tv в байты (uint8), каждые 8 бит упакованы в один байт.
+        self.tv_packed = np.packbits(self.tv, bitorder='big')
 
         # Отложенные вычисления, инициализация при необходимости
         self._sv = None  # sign_vector - знаковый или полярный вектор.
@@ -68,16 +69,13 @@ class BoolFunc:
         return cls.from_packed(packed, n)
 
     @classmethod
-    def random(cls, n: int, packed: bool = False):
+    def random(cls, n: int):
         size = 1 << n
 
         # Объект генератора псевдослучайных чисел, основанный на современном алгоритме PCG64
         rng = np.random.default_rng()
         tv = rng.integers(0, 2, size=size, dtype=np.uint8)  # Случайный массив 0 и 1 размера size
-        if packed:
-            return cls.from_packed(np.packbits(tv), n)
-        else:
-            return cls.from_array(tv)
+        return cls.from_array(tv)
 
     def save_to_bin(self, filename: str) -> None:
         """
@@ -132,14 +130,14 @@ class BoolFunc:
         """Вычисление АНФ функции с помощью быстрого преобразование Мёбиуса"""
         if self._anf is None:
             fmt([0, 1, 1, 0], 2)
-            self._anf = fmt(self.tv, self.n)
+            self._anf = self.mobius_transform(self.tv.copy(), self.n)
         return self._anf
 
     @property
     def walsh_spec(self):
         """Вычисление спектра с помощью быстрого преобразования Уолша-Адамара"""
         if self._walsh_spec is None:
-            self._walsh_spec = fwht(self.sv)
+            self._walsh_spec = fwht(self.sv.astype(np.int64))
         return self._walsh_spec
 
     @property
@@ -188,42 +186,55 @@ class BoolFunc:
                 return False
         return True
 
-    def walsh_hadamard_transform(self):
-        H2 = np.array([[1, 1], [1, -1]], dtype=int)
-        H2n = np.eye(self.size, dtype=int)
-        for i in range(1, self.n + 1):
-            A = np.kron(np.kron(np.eye(1 << (self.n - i), dtype=int), H2), np.eye(1 << (i - 1), dtype=int))
-            H2n @= A
-        return self.sv @ H2n
+    @staticmethod
+    def mobius_transform(f, n):
+        return fmt(f, n)
 
-    def mobius_transform(self, f):
-        g = f.copy()  # Копируем исходный массив
-        n = self.n  # Количество битов
-        for i in range(n):  # Перебираем все биты
-            for a in range(1 << n):  # Перебираем все возможные маски
-                if (a >> i) & 1:  # Если i-й бит в маске `a` установлен
-                    g[a] ^= g[a ^ (1 << i)]  # Добавляем (XOR) значение подмаски без этого бита
-        return g
+    @property
+    def nonlinearity(self):
+        if self.n > 16:
+            max_abs, _ = max_abs_par(self.walsh_spec)
+        else:
+            max_abs, _ = max_abs_seq(self.walsh_spec)
+        return (1 << (self.n - 1)) - (abs(max_abs) >> 1)
 
-    # def linear_function(self, a: str):
-    #     a = np.array(list(map(int, a)))
-    #     f = np.zeros(1 << len(a), dtype=int)
-    #     for i in range(self.n):
-    #         if a[i]:
-    #             f[1 << i] = 1
-    #     return f
-    #
-    # def dot(self, a: str, b: str) -> int:
-    #     assert len(a) == self.size, "Размерность скаляра не совпадает с размерностью функции!"
-    #     assert all(c in '01' for c in a), f"Ошибка: скаляр {a} содержит символы, отличные от '0' и '1'."
-    #     a = np.array(list(map(int, a)))
-    #     res = 0
-    #     for i in range(self.size):
-    #         res ^= (a[i] & self.anf[i])
-    #     return res
+    @property
+    def best_affine_approximation(self):
+        if np.all(self.walsh_spec == 0):
+            return np.zeros(self.size, dtype=np.uint8)
+        else:
+            b, a_ind = max_abs_par(self.walsh_spec) if self.n >= 20 else max_abs_seq(self.walsh_spec)
+            a = int_to_bitarray(a_ind, self.n)
+            b_bit = 0 if b > 0 else 1
+            anf = self.linear_function(a)
+        return self.mobius_transform(anf, self.n) ^ b_bit
+
+    @staticmethod
+    def linear_function(a: np.ndarray):
+        packed = linear_function_bitpacked_par(a) if a.shape[0] < 20 else linear_function_bitpacked_par(a)
+        return np.unpackbits(packed, bitorder='little')[:1 << a.shape[0]]
+
+    def boolean_derivative(self, a: int):
+        if a >= self.size:
+            raise ValueError(f"Некорректное направление: требуется направление размером {self.n} бит.")
+        if a == 0:
+            return np.zeros(self.size, dtype=np.uint8)
+        x_a = np.arange(self.size) ^ a
+        return np.array([self.tv[i] ^ self.tv[x_a[i]] for i in range(self.size)])
 
 
-@njit(cache=True)
+#
+# def dot(self, a: str, b: str) -> int:
+#     assert len(a) == self.size, "Размерность скаляра не совпадает с размерностью функции!"
+#     assert all(c in '01' for c in a), f"Ошибка: скаляр {a} содержит символы, отличные от '0' и '1'."
+#     a = np.array(list(map(int, a)))
+#     res = 0
+#     for i in range(self.size):
+#         res ^= (a[i] & self.anf[i])
+#     return res
+
+
+@njit
 def fmt(g, n):
     for i in range(n):
         step = 1 << i
@@ -235,7 +246,7 @@ def fmt(g, n):
     return g
 
 
-@njit(cache=True)
+@njit
 def fwht(arr):
     res = arr.copy()
     n = res.shape[0]
@@ -276,6 +287,67 @@ def fgbp(size: int, m: int, popcount_table: np.ndarray) -> np.ndarray:
             result[idx] = a
             idx += 1
     return result
+
+
+@njit
+def max_abs_seq(arr: np.ndarray) -> tuple[int, int]:
+    """Функция поиска абсолютного максимума в спектре"""
+    ind = 0
+    max_val = np.int64(0)
+    for i in range(arr.shape[0]):
+        current_val = np.int64(arr[i])
+        if abs(current_val) > abs(max_val):
+            max_val = current_val
+            ind = i
+    return max_val, ind
+
+
+# Параллельный максимум
+@njit(parallel=True)
+def max_abs_par(arr: np.ndarray) -> tuple[int, int]:
+    """Функция поиска абсолютного максимума в спектре c применением параллельных потоков для итерации цикла"""
+    ind = 0
+    max_val = np.int64(0)
+    for i in prange(arr.shape[0]):
+        current_val = np.int64(arr[i])
+        if abs(current_val) > abs(max_val):
+            max_val = current_val
+            ind = i
+    return max_val, ind
+
+
+@njit
+def linear_function_bitpacked_seq(a):
+    n = a.shape[0]
+    bit_len = 1 << n
+    num_bytes = (bit_len + 7) // 8
+    ax = np.zeros(num_bytes, dtype=np.uint8)
+    for i in range(n):
+        if a[i]:
+            index = 1 << i
+            ax[index // 8] |= 1 << (index % 8)
+    return ax
+
+
+@njit(parallel=True)
+def linear_function_bitpacked_par(a):
+    n = a.shape[0]
+    bit_len = 1 << n
+    num_bytes = (bit_len + 7) // 8
+    ax = np.zeros(num_bytes, dtype=np.uint8)
+    for i in prange(n):
+        if a[i]:
+            index = 1 << i
+            ax[index // 8] |= 1 << (index % 8)
+    return ax
+
+
+@njit
+def int_to_bitarray(x: int, n: int) -> np.ndarray:
+    out = np.empty(n, dtype=np.uint8)
+    for i in range(n):
+        out[n - 1 - i] = (x >> i) & 1
+    return out
 
 
 if __name__ == "__main__":
@@ -329,7 +401,30 @@ if __name__ == "__main__":
     # f_for_save.save_to_bin("func_4.bin")
     # f_for_load = BoolFunc.load_from_bin("func_4.bin")
     # print(f_for_load.tv)
-
+    # ---------------------------------Проверка веса .bin файла функции от 30 переменных--------------------------------
+    # f_for_save_size = BoolFunc.random(30)
+    # f_for_save_size.save_to_bin("func_30.bin")
+    # ls -lah -> -rw-rw-r-- 1 fedos fedos 129M мая 22 14:54 func_30.bin,
+    # Так как 2^30/2^3 = 128 Мб
+    # ---------------------------------Проверка скорости загрузки функции от 30 переменных------------------------------
+    # f_for_save_size = BoolFunc.random(30)
+    # f_for_save_size.save_to_bin("func_30.bin")
+    # time_for_load = timeit.timeit(lambda: BoolFunc.load_from_bin("func_30.bin"), globals=globals(), number=100)
+    # print("Инициализации функции от 30 переменных: среднее время =", time_for_load / 100)
+    # Инициализации функции от 30 переменных: среднее время = 5.785267059630005
+    # ----------------------------------Проверка скорости функций-------------------------------------------------------
+    # time_for_random = timeit.timeit(lambda: BoolFunc.random(30), globals=globals(), number=100)
+    # print("Генерация функции от 30 переменных: среднее время =", time_for_random / 100)
+    # Генерация функции от 30 переменных: среднее время = 7.411581638700008
+    # f = BoolFunc.random(29)
+    # print(f.nonlinearity)
+    # print(f.best_affine_approximation)
+    # f = BoolFunc("01010011")
+    # print(f.tv)
+    # print(f.anf)
+    # print(BoolFunc.linear_function(np.array([1,1])))
+    f = BoolFunc("0001")
+    print(f.boolean_derivative(0b0))
     # f = BoolFunc("1" * (1 << 21))
     # # print(f'Вектор значений: {f.tv}')
     # # print(f'Вес функции: {f.w}')
