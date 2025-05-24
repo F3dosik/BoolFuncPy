@@ -153,39 +153,6 @@ class BoolFunc:
 
         return int(np.sum(self.tv ^ other))
 
-    def generate_by_popcount(self, m: int):
-        """Генерация через popcount (эффективно для n ≤ 16)."""
-        return fgbp(self.size, m, self.popcount_table16)
-
-    def generate_by_combinations(self, m: int):
-        """Генерация через combinations (эффективно для n > 16)."""
-        for k in range(1, m + 1):
-            for positions in combinations(range(self.n), k):
-                yield sum(1 << i for i in positions)
-
-    def is_correlation_immune(self, order: int) -> bool:
-        """Проверяет, является ли функция корреляционно-иммунной заданного порядка.
-
-        Args:
-            order (int): Порядок корреляционной иммунности для проверки
-
-        Returns:
-            bool: True если функция корреляционно-иммунна порядка 'order', иначе False
-        """
-        if order < 0:
-            return True
-
-        # Для n < 16 используем быстрый метод с popcount
-        if self.n < 16:
-            indices = self.generate_by_popcount(order)
-            return np.all(self.walsh_spec[indices] == 0)
-
-        # Для n >= 16 используем генератор combinations
-        for a in self.generate_by_combinations(order):
-            if self.walsh_spec[a] != 0:
-                return False
-        return True
-
     @staticmethod
     def mobius_transform(f, n):
         return fmt(f, n)
@@ -214,6 +181,50 @@ class BoolFunc:
         packed = linear_function_bitpacked_par(a) if a.shape[0] < 20 else linear_function_bitpacked_par(a)
         return np.unpackbits(packed, bitorder='little')[:1 << a.shape[0]]
 
+    @property
+    def algebraic_degree(self):
+        if self.w is not None:
+            if self.w % 2 != 0:
+                return self.n
+            if self.n <= 12:
+                d_max = upper_deg(self.w, self.n)
+                return max(i.bit_count() for i in range(1 << self.n) if self.anf[i] and i.bit_count() <= d_max)
+            elif self.n > 12:
+                degree_candidates = get_degree_candidates(self.w, self.n)
+                degree_index_sets = [generate_bitmask_indices_fast(self.n, d) for d in degree_candidates]
+                for i in range(len(degree_index_sets) - 1, -1, -1):
+                    for ind in degree_index_sets[i]:
+                        if self.anf[ind]:
+                            return degree_candidates[i]
+        else:
+            if self.n >= 12:
+                return algebraic_degree_anf(self.anf)
+        return max(i.bit_count() for i in range(self.size) if self.anf[i])
+
+    def is_correlation_immune(self, order: int) -> bool:
+        """Проверяет, является ли функция корреляционно-иммунной заданного порядка."""
+        if order < 0:
+            return True
+
+        # Для n < 16 используем быстрый метод с popcount
+        if self.n < 16:
+            indices = self.generate_by_popcount(order)
+            return np.all(self.walsh_spec[indices] == 0)
+
+        # Для n >= 16 используем генератор combinations
+        for a in self.generate_by_combinations(order):
+            if self.walsh_spec[a] != 0:
+                return False
+        return True
+
+    def generate_by_popcount(self, m: int):
+        """Генерация булевых векторов с весом <=  m через popcount (эффективно для n ≤ 16)."""
+        return fgbp(self.size, m, self.popcount_table16)
+
+    def generate_by_combinations(self, m: int):
+        """Генерация булевых векторов с весом <= m через combinations (эффективно для n > 16)."""
+        return generate_vectors_fast(self.n, m)
+
     def boolean_derivative(self, a: int):
         if a >= self.size:
             raise ValueError(f"Некорректное направление: требуется направление размером {self.n} бит.")
@@ -222,16 +233,14 @@ class BoolFunc:
         x_a = np.arange(self.size) ^ a
         return np.array([self.tv[i] ^ self.tv[x_a[i]] for i in range(self.size)])
 
-
-#
-# def dot(self, a: str, b: str) -> int:
-#     assert len(a) == self.size, "Размерность скаляра не совпадает с размерностью функции!"
-#     assert all(c in '01' for c in a), f"Ошибка: скаляр {a} содержит символы, отличные от '0' и '1'."
-#     a = np.array(list(map(int, a)))
-#     res = 0
-#     for i in range(self.size):
-#         res ^= (a[i] & self.anf[i])
-#     return res
+    @property
+    def find_fictive_vars(self):
+        var_flags = 0
+        for i in range(self.anf.shape[0]):
+            if self.anf[i]:
+                var_flags |= i
+        fictive_vars = [i for i in range(self.n) if not (var_flags & (1 << i))]
+        return fictive_vars if fictive_vars else None
 
 
 @njit
@@ -350,6 +359,104 @@ def int_to_bitarray(x: int, n: int) -> np.ndarray:
     return out
 
 
+@njit
+def algebraic_degree_anf(anf):
+    max_deg = 0
+    for i in range(anf.shape[0]):
+        if anf[i]:
+            deg = 0
+            x = i
+            while x:
+                x &= x - 1
+                deg += 1
+            if deg > max_deg:
+                max_deg = deg
+    return max_deg
+
+
+@njit
+def upper_deg(w, n):
+    deg = 0
+    for d in range(1, n + 1):
+        low = 1 << (n - d)
+        high = (1 << n) - low
+        if low <= w <= high:
+            deg = d
+    return deg
+
+
+@njit
+def get_degree_candidates(w, n):
+    candidates = np.empty(n, dtype=np.uint8)
+    i = 0
+    for d in range(1, n + 1):
+        low = 1 << (n - d)
+        high = (1 << n) - low
+        if low <= w <= high:
+            candidates[i] = d
+            i += 1
+    return candidates[:i]
+
+
+@njit
+def binom(n, k):
+    if k < 0 or k > n:
+        return 0
+    if k == 0 or k == n:
+        return 1
+    res = 1
+    for i in range(1, k + 1):
+        res = res * (n - i + 1) // i  # n(n-1)...(n-k+1) // k!
+    return res
+
+
+@njit
+def generate_bitmask_indices_fast(n, d):
+    total = binom(n, d)
+    result = np.empty(total, dtype=np.uint32)
+
+    idx = 0
+    bits = np.arange(d, dtype=np.uint32)
+    while True:
+        # Преобразуем позиции в число
+        num = 0
+        for i in range(d):
+            num |= 1 << bits[i]
+        result[idx] = num
+        idx += 1
+
+        # Найти следующую комбинацию
+        for i in range(d - 1, -1, -1):
+            if bits[i] != i + n - d:
+                break
+        else:
+            break  # всё сгенерировано
+
+        bits[i] += 1
+        for j in range(i + 1, d):
+            bits[j] = bits[j - 1] + 1
+
+    return result
+
+
+@njit
+def generate_vectors_fast(n: int, m: int):
+    """Генерация всех векторов с весом <= m (возвращает массив np.uint32)."""
+    total = 0
+    for k in range(1, m + 1):
+        total += binom(n, k)
+    print(total)
+    result = np.empty(total, dtype=np.uint32)
+    idx = 0
+
+    for k in range(1, m + 1):
+        bitmasks = generate_bitmask_indices_fast(n, k)
+        for mask in bitmasks:
+            result[idx] = mask
+            idx += 1
+    return result
+
+
 if __name__ == "__main__":
     pass
     # Заранее вычисленные и сохраненные значения popcount_table*
@@ -416,47 +523,4 @@ if __name__ == "__main__":
     # time_for_random = timeit.timeit(lambda: BoolFunc.random(30), globals=globals(), number=100)
     # print("Генерация функции от 30 переменных: среднее время =", time_for_random / 100)
     # Генерация функции от 30 переменных: среднее время = 7.411581638700008
-    # f = BoolFunc.random(29)
-    # print(f.nonlinearity)
-    # print(f.best_affine_approximation)
-    # f = BoolFunc("01010011")
-    # print(f.tv)
-    # print(f.anf)
-    # print(BoolFunc.linear_function(np.array([1,1])))
-    f = BoolFunc("0001")
-    print(f.boolean_derivative(0b0))
-    # f = BoolFunc("1" * (1 << 21))
-    # # print(f'Вектор значений: {f.tv}')
-    # # print(f'Вес функции: {f.w}')
-    # # print(f'Размер вектора значений: {f.size}')
-    # # print(f'Количество переменных: {f.n}')
-    # # print(f'Сбалансированность: {f.is_balanced()}')
-    # # g = BoolFunc("1000")
-    # # print(f'Расстояние Хэмминга: {f.hamming_distance(g)}')
-    # # time1 = timeit.timeit(lambda: f.walsh_hadamard_transform(), globals=globals(), number=100)
-    # # dummy = np.array([0, 1, 1, 1], dtype=np.int64)
-    # # fwht(dummy)  # JIT-компиляция происходит здесь
-    # # time2 = timeit.timeit(lambda: f.fast_walsh_hadamard_transform, globals=globals(), number=100)
-    # # print("Функция 1: среднее время =", time1 / 100)
-    # # print("Функция 2: среднее время =", time2 / 100)
-    # time1 = timeit.timeit(lambda: f.mobius_transform(f.tv), globals=globals(), number=100)
-    # dummy = np.array([0, 1, 1, 1], dtype=np.int64)
-    # fmt(dummy, 2)  # JIT-компиляция происходит здесь
-    # time2 = timeit.timeit(lambda: f.fast_mobius_transform(), globals=globals(), number=100)
-    # print("Функция 1: среднее время =", time1 / 100)  # Функция 1: среднее время = 4.8954639914499785
-    # print("Функция 2: среднее время =", time2 / 100)  # Функция 2: среднее время = 0.018933899059993563
-    # fgbp(4, 2, f.popcount_table16)  # JIT-компиляция происходит здесь
-    # time1 = timeit.timeit(lambda: f.generate_by_popcount(4), globals=globals(), number=100)
-    #
-    #
-    # def run_generate():
-    #     for _ in f.generate_by_combinations(4):
-    #         pass
-    #
-    #
-    # time2 = timeit.timeit(lambda: run_generate(), globals=globals(), number=100)
-    # print("Функция 1: среднее время =", time1 / 100)
-    # print("Функция 2: среднее время =", time2 / 100)
-    # print(f"Ускорение: {time1 / time2}x")
-    # f = BoolFunc("00110101")
-    # print(f.anf)
+
