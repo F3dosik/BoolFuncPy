@@ -1,6 +1,3 @@
-from codecs import BOM_LE
-from itertools import combinations
-
 import numpy as np
 from numba import njit, prange
 
@@ -218,7 +215,7 @@ class BoolFunc:
         return True
 
     def generate_by_popcount(self, m: int):
-        """Генерация булевых векторов с весом <=  m через popcount (эффективно для n ≤ 16)."""
+        """Генерация булевых векторов с весом <= m через popcount (эффективно для n ≤ 16)."""
         return fgbp(self.size, m, self.popcount_table16)
 
     def generate_by_combinations(self, m: int):
@@ -445,7 +442,6 @@ def generate_vectors_fast(n: int, m: int):
     total = 0
     for k in range(1, m + 1):
         total += binom(n, k)
-    print(total)
     result = np.empty(total, dtype=np.uint32)
     idx = 0
 
@@ -463,8 +459,8 @@ if __name__ == "__main__":
     # popcount_table8 - массив, который хранит количество единичных битов для всех возможных 8-битных чисел (от 0 до 255).
     # popcount_table8 = np.array([bin(i).count('1') for i in range(256)], dtype=np.uint8)
     # np.savez_compressed("popcount8.npz", popcount8=popcount_table8)
-    # # popcount_table16 - массив, который хранит количество единичных битов для всех возможных 8-битных чисел (от 0 до 255).
-    # popcount_table16 = np.array([bin(i).count('1') for i in range(256)], dtype=np.uint8)
+    # # popcount_table16 - массив, который хранит количество единичных битов для всех возможных 16-битных чисел (от 0 до 65535).
+    # popcount_table16 = np.array([bin(i).count('1') for i in range(65536)], dtype=np.uint8)
     # np.savez_compressed("popcount16.npz", popcount16=popcount_table16)
 
     # ------------------------------------------Проверка from_str-------------------------------------------------------
