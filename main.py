@@ -164,13 +164,10 @@ class BoolFunc:
 
     @property
     def best_affine_approximation(self):
-        if np.all(self.walsh_spec == 0):
-            return np.zeros(self.size, dtype=np.uint8)
-        else:
-            b, a_ind = max_abs_par(self.walsh_spec) if self.n >= 20 else max_abs_seq(self.walsh_spec)
-            a = int_to_bitarray(a_ind, self.n)
-            b_bit = 0 if b > 0 else 1
-            anf = self.linear_function(a)
+        b, a_ind = max_abs_par(self.walsh_spec) if self.n >= 20 else max_abs_seq(self.walsh_spec)
+        a = int_to_bitarray(a_ind, self.n)
+        b_bit = 0 if b > 0 else 1
+        anf = self.linear_function(a)
         return self.mobius_transform(anf, self.n) ^ b_bit
 
     @staticmethod
