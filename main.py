@@ -154,18 +154,27 @@ class BoolFunc:
     @property
     def nonlinearity(self):
         if self.n > 16:
-            max_abs, _ = max_abs_par(self.walsh_spec)
+            max_abs = max_abs_par(self.walsh_spec)[0][0]
         else:
-            max_abs, _ = max_abs_seq(self.walsh_spec)
+            max_abs = max_abs_seq(self.walsh_spec)[0][0]
         return (1 << (self.n - 1)) - (abs(max_abs) >> 1)
 
     @property
     def best_affine_approximation(self):
-        b, a_ind = max_abs_par(self.walsh_spec) if self.n >= 20 else max_abs_seq(self.walsh_spec)
-        a = int_to_bitarray(a_ind, self.n)
-        b_bit = 0 if b > 0 else 1
-        anf = self.linear_function(a)
-        return self.mobius_transform(anf, self.n) ^ b_bit
+        max_abs = max_abs_par(self.walsh_spec) if self.n >= 20 else max_abs_seq(self.walsh_spec)
+        min_dist = self.size
+        best_appr = None
+        for coeff, index in max_abs:
+            a = int_to_bitarray(index, self.n)
+            b_bit = 0 if coeff > 0 else 1
+            anf = self.linear_function(a)
+            candidate = self.mobius_transform(anf, self.n) ^ b_bit
+            dist = self.hamming_distance(candidate)
+            if dist < min_dist:
+                min_dist = dist
+                best_appr = candidate
+
+        return best_appr
 
     @staticmethod
     def linear_function(a: np.ndarray):
@@ -215,6 +224,7 @@ class BoolFunc:
     def generate_by_combinations(self, m: int):
         """Генерация булевых векторов с весом <= m через combinations (эффективно для n > 16)."""
         return generate_vectors_fast(self.n, m)
+
     def boolean_derivative(self, a: int):
         if a >= self.size:
             raise ValueError(f"Некорректное направление: требуется направление размером {self.n} бит.")
@@ -222,7 +232,6 @@ class BoolFunc:
             return np.zeros(self.size, dtype=np.uint8)
         x_a = np.arange(self.size) ^ a
         return np.array([self.tv[i] ^ self.tv[x_a[i]] for i in range(self.size)])
-
 
     def visualize_anf(self):
         terms = []
@@ -298,30 +307,33 @@ def fgbp(size: int, m: int, popcount_table: np.ndarray) -> np.ndarray:
 
 
 @njit
-def max_abs_seq(arr: np.ndarray) -> tuple[int, int]:
-    """Функция поиска абсолютного максимума в спектре"""
-    ind = 0
-    max_val = np.int64(0)
-    for i in range(arr.shape[0]):
-        current_val = np.int64(arr[i])
-        if abs(current_val) > abs(max_val):
-            max_val = current_val
-            ind = i
-    return max_val, ind
+def max_abs_seq(arr: np.ndarray):
+    max_val = np.abs(arr[0])
+    result = [(arr[0], 0)]
+    for i in range(1, arr.shape[0]):
+        val = arr[i]
+        abs_val = abs(val)
+        if abs_val > max_val:
+            max_val = abs_val
+            result = [(val, i)]
+        elif abs_val == max_val:
+            result.append((val, i))
+    return result
 
 
-# Параллельный максимум
 @njit(parallel=True)
-def max_abs_par(arr: np.ndarray) -> tuple[int, int]:
-    """Функция поиска абсолютного максимума в спектре c применением параллельных потоков для итерации цикла"""
-    ind = 0
-    max_val = np.int64(0)
-    for i in prange(arr.shape[0]):
-        current_val = np.int64(arr[i])
-        if abs(current_val) > abs(max_val):
-            max_val = current_val
-            ind = i
-    return max_val, ind
+def max_abs_par(arr: np.ndarray):
+    max_val = np.abs(arr[0])
+    result = [(arr[0], 0)]
+    for i in prange(1, arr.shape[0]):
+        val = arr[i]
+        abs_val = abs(val)
+        if abs_val > max_val:
+            max_val = abs_val
+            result = [(val, i)]
+        elif abs_val == max_val:
+            result.append((val, i))
+    return result
 
 
 @njit
@@ -453,6 +465,3 @@ def generate_vectors_fast(n: int, m: int):
             result[idx] = mask
             idx += 1
     return result
-
-
-
